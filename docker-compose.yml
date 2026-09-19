@@ -1,0 +1,68 @@
+# =====================================================================
+# 离线稍后阅读 + 笔记 + 微博自动同步 一体化部署栈
+# 适用: TrueNAS SCALE (Apps -> Install via YAML, 或命令行 docker compose)
+# 使用方式:
+#   1. 复制 .env.example 为 .env, 填好其中的变量
+#   2. 在 TrueNAS 中创建数据集 ${APPS_DIR} (默认 /mnt/tank/apps)
+#   3. docker compose up -d  (或在 TrueNAS Apps 界面 Install via YAML)
+# =====================================================================
+
+name: readstack
+
+services:
+
+  # ---------- 1. Karakeep: 收藏 + 全文存档 + 离线稍后读 ----------
+  karakeep:
+    image: ghcr.io/karakeep-app/karakeep:release
+    restart: unless-stopped
+    depends_on:
+      - meilisearch
+    ports:
+      - "31000:3000"
+    environment:
+      DATA_DIR: /data
+      KARAKEEP_VERSION: release
+      MEILI_ADDR: http://meilisearch:7700
+      NEXTAUTH_URL: ${NEXTAUTH_URL}          # 例: http://192.168.1.10:31000
+      NEXTAUTH_SECRET: ${NEXTAUTH_SECRET}    # openssl rand -base64 32 生成
+    volumes:
+      - ${APPS_DIR}/karakeep:/data
+
+  meilisearch:
+    image: getmeili/meilisearch:v1.13
+    restart: unless-stopped
+    environment:
+      MEILI_NO_ANALYTICS: "true"
+      MEILI_MASTER_KEY: ${MEILI_MASTER_KEY}
+    volumes:
+      - ${APPS_DIR}/karakeep/meili:/meili_data
+
+  # ---------- 2. Trilium: 层级笔记 (Web UI + 桌面端同步) ----------
+  trilium:
+    image: triliumnext/trilium:latest
+    restart: unless-stopped
+    ports:
+      - "31080:8080"
+    environment:
+      TRILIUM_DATA_DIR: /home/node/trilium-data
+    volumes:
+      - ${APPS_DIR}/trilium:/home/node/trilium-data
+
+  # ---------- 3. weibo-sync: 微博收藏/点赞自动同步器 ----------
+  # 扫码/手动 Cookie 登录 -> 轮询收藏与点赞 -> 推送到 Karakeep
+  weibo-sync:
+    build: ./weibo-sync
+    restart: unless-stopped
+    ports:
+      - "31900:9000"
+    environment:
+      KARAKEEP_URL: http://karakeep:3000     # 容器内直连, 无需修改
+      KARAKEEP_API_KEY: ${KARAKEEP_API_KEY}  # Karakeep 设置页生成
+      SYNC_INTERVAL_SECONDS: "600"           # 轮询间隔(秒), 建议 >= 600
+      PAGES_PER_SOURCE: "3"                  # 每轮每个来源抓取页数
+      FAV_TAG: "微博收藏"
+      LIKE_TAG: "微博点赞"
+      FAV_CONTAINER: ${FAV_CONTAINER:-}      # 收藏文件夹 containerid, 留空则跳过收藏只同步点赞
+      TZ: ${TZ:-Asia/Shanghai}
+    volumes:
+      - ${APPS_DIR}/weibo-sync:/data         # 保存 cookie 与增量游标
