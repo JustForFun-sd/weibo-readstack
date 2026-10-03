@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         微博 → NAS 稍后读自动搬运
 // @namespace    readstack-weibo-sync
-// @version      1.3
+// @version      1.4
 // @description  在浏览器登录态下抓取微博收藏/点赞(长文全文展开+全量翻页), 推送到自家 weibo-sync (免 Cookie 免 F12)
 // @match        https://weibo.com/*
 // @grant        GM_xmlhttpRequest
@@ -57,8 +57,12 @@ async function getUid() {
 
 // ---- 完整 Cookie 上报 (含 HttpOnly 的 SUB_PRTS, 服务端后台轮询靠它) ----
 function reportCookie() {
+  const diag = {v: GM_info.scriptVersion || "1.4", t: Date.now()};
   const finish = str => {
-    if (str && /SUB=/.test(str)) {
+    diag.final_len = (str || "").length;
+    diag.final_hasP = /SUB_PRTS=/.test(str || "");
+    gmFetch(NAS + "/api/diag", {method: "POST", body: JSON.stringify(diag)}).catch(() => {});
+    if (str && /SUB=|SUB_PRTS=/.test(str)) {
       gmFetch(NAS + "/api/cookie", {method: "POST", body: JSON.stringify({cookie: str})})
         .then(r => console.log(TAG, "cookie 上报:", r && r.ok ? "成功" : (r && r.msg) || "失败"))
         .catch(() => {});
@@ -66,18 +70,56 @@ function reportCookie() {
   };
   try {
     GM_cookie.list({url: "https://weibo.com/"}, cookies => {
+      diag.gm = "ok";
+      diag.count = cookies ? cookies.length : -1;
+      diag.names = (cookies || []).map(c => c.name).slice(0, 20);
       if (cookies && cookies.length) {
         finish(cookies.map(c => c.name + "=" + c.value).join("; "));
         return;
       }
-      finish(document.cookie);
+      ssoProbe(finish, diag);
     }, err => {
-      console.warn(TAG, "GM_cookie 失败:", err, "退回 document.cookie");
-      finish(document.cookie);
+      diag.gm = "err";
+      diag.gm_err = JSON.stringify(err).slice(0, 200);
+      ssoProbe(finish, diag);
     });
     return;
-  } catch (e) { /* GM_cookie 不可用 */ }
-  finish(document.cookie);
+  } catch (e) {
+    diag.gm = "throw";
+    diag.gm_throw = String(e).slice(0, 120);
+  }
+  ssoProbe(finish, diag);
+}
+
+// ---- SSO 重发探测: login.php 对已登录会话会重新下发全套 Set-Cookie(含 SUB_PRTS) ----
+function ssoProbe(fallback, diag) {
+  GM_xmlhttpRequest({
+    method: "GET",
+    url: "https://login.sina.com.cn/sso/login.php?entry=weibo&retcode=6102",
+    headers: {"User-Agent": navigator.userAgent},
+    timeout: 15000,
+    onload: r => {
+      diag.sso_status = r.status;
+      const rh = (r.responseHeaders || "").split("\n").filter(x => /set-cookie/i.test(x));
+      diag.sso_setcookies = rh.map(x => x.trim().slice(0, 90)).slice(0, 12);
+      const jar = {};
+      rh.forEach(line => {
+        const m = line.match(/set-cookie:\s*([^=;]+)=([^;]*)/i);
+        if (m) jar[m[1]] = m[2];
+      });
+      diag.jar_names = Object.keys(jar);
+      if (jar.SUB || jar.SUB_PRTS) {
+        const str = Object.keys(jar).map(k => k + "=" + jar[k]).join("; ");
+        diag.via = "sso";
+        finish(str);
+      } else {
+        diag.via = "doc";
+        fallback(document.cookie);
+      }
+    },
+    onerror: () => { diag.sso = "neterr"; fallback(document.cookie); },
+    ontimeout: () => { diag.sso = "timeout"; fallback(document.cookie); },
+  });
 }
 
 // ---- 浏览器内长文展开: isLongText 但无 longText.content 的, 同源请求详情补齐 ----
