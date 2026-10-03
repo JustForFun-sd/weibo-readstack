@@ -209,13 +209,13 @@ def api_ingest():
     src = weibo_api._statuses_of(raw.get("data") or raw)
     items = [n for n in (weibo_api.normalize(s) for s in src) if n]
     ck = state.get_cookie()
-    for x in items:
+    seen = state.get_state()[kind]
+    new = [x for x in items if x["mid"] not in seen]
+    for x in new:   # 内容增强只对新增做, 省请求防风控
         try:
             x["content"] = weibo_api.build_content(ck, x)
         except Exception:
             x["content"] = x.get("text") or ""
-    seen = state.get_state()[kind]
-    new = [x for x in items if x["mid"] not in seen]
     tag = config.FAV_TAG if kind == "fav" else config.LIKE_TAG
     ok, err = 0, ""
     if new:
