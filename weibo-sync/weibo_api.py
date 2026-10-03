@@ -150,7 +150,7 @@ def _html_to_text(html):
     if not html:
         return ""
     s = html
-    s = re.sub(r"(?is)<img[^>]*alt=\"([^\"]+)\"[^>]*>", r"[\1]", s)
+    s = re.sub(r"(?is)<img[^>]*alt=([\"'])(.*?)\1[^>]*>", r"[\2]", s)
     s = re.sub(r"(?is)<img[^>]*>", "", s)
     s = re.sub(r"(?is)<br\s*/?>", "\n", s)
     s = re.sub(r"(?is)</p>|</div>|</li>|</tr>", "\n", s)
@@ -229,8 +229,7 @@ def _extract_pics(st):
                 u = g.get("url") or g.get("mobile") or ""
                 if u:
                     break
-            u = u or _pic_url(v)
-            urls.append(u)
+            urls.append(_pic_url(u) if u else _pic_url(v))
     for p in (st.get("pics") or []):
         urls.append(_pic_url(p))
     pi = st.get("page_info") or {}
@@ -297,27 +296,29 @@ def _long_content(st, cookie_str):
         return _html_to_text(lt["content"])
     if isinstance(lt, str) and lt.strip():
         return _html_to_text(lt)
-    ident = [str(st.get("mid") or st.get("id") or st.get("idstr") or "")]
-    bid = st.get("bid") or st.get("mblogid")
-    if bid:
-        ident.append(str(bid))
-    for key in ident:
-        if not key:
-            continue
-        try:
-            r = requests.get(PC + "/ajax/statuses/show?id=" + key,
-                             headers=_headers(cookie_str, PC, UA, _xsrf(cookie_str)),
-                             timeout=20)
-            j = r.json()
-            data = j.get("data") or j
-            lt2 = data.get("longText") or {}
-            if isinstance(lt2, dict) and lt2.get("content"):
-                return _html_to_text(lt2["content"])
-            if data.get("text") and str(data.get("id") or data.get("mid") or "") == ident[0]:
-                return _html_to_text(data["text"])
-        except Exception:
-            pass
-    return fetch_longtext(cookie_str, ident[0])
+    # PC 详情接口需要 SUB_PRTS; 残缺 cookie 直接跳过, 省时防限流
+    if has_pc_cookie(cookie_str):
+        ident = [str(st.get("mid") or st.get("id") or st.get("idstr") or "")]
+        bid = st.get("bid") or st.get("mblogid")
+        if bid:
+            ident.append(str(bid))
+        for key in ident:
+            if not key:
+                continue
+            try:
+                r = requests.get(PC + "/ajax/statuses/show?id=" + key,
+                                 headers=_headers(cookie_str, PC, UA, _xsrf(cookie_str)),
+                                 timeout=20)
+                j = r.json()
+                data = j.get("data") or j
+                lt2 = data.get("longText") or {}
+                if isinstance(lt2, dict) and lt2.get("content"):
+                    return _html_to_text(lt2["content"])
+                if data.get("text") and str(data.get("id") or data.get("mid") or "") == ident[0]:
+                    return _html_to_text(data["text"])
+            except Exception:
+                pass
+    return fetch_longtext(cookie_str, str(st.get("mid") or st.get("id") or st.get("idstr") or ""))
 
 
 def _rich_lines(st, cookie_str):
