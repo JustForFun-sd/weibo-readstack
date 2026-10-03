@@ -75,6 +75,10 @@ _UA_M = ("Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) "
 
 _TAG_RE = re.compile(r"<[^>]+>")
 
+_ENTITIES = {"&nbsp;": " ", "&amp;": "&", "&lt;": "<", "&gt;": ">",
+             "&quot;": '"', "&#39;": "'", "&#x27;": "'", "&middot;": "·",
+             "&hellip;": "…", "&yen;": "¥", "&pound;": "£", "#39;": "'"}
+
 
 def _headers(cookie_str, host=PC, ua=UA, xsrf=""):
     h = {
@@ -132,8 +136,35 @@ def validate(cookie_str):
 
 
 
+def _unescape(s):
+    for k, v in _ENTITIES.items():
+        s = s.replace(k, v)
+    s = re.sub(r"&#(\d+);", lambda m: chr(int(m.group(1)))
+               if m.group(1).isdigit() and int(m.group(1)) < 0x110000 else "", s)
+    return s
+
+
+def _html_to_text(html):
+    """微博 text/longText 的 HTML -> 排版友好纯文本: 保留换行, @/# 留文字,
+    emoji 图转 [alt], 去掉 '全文' 锚文本(正文另有全文提取)。"""
+    if not html:
+        return ""
+    s = html
+    s = re.sub(r"(?is)<img[^>]*alt=\"([^\"]+)\"[^>]*>", r"[\1]", s)
+    s = re.sub(r"(?is)<img[^>]*>", "", s)
+    s = re.sub(r"(?is)<br\s*/?>", "\n", s)
+    s = re.sub(r"(?is)</p>|</div>|</li>|</tr>", "\n", s)
+    s = re.sub(r"(?is)<a[^>]*>\s*(全文|网页链接|O网页链接|查看图片|视频链接)\s*</a>", "", s)
+    s = re.sub(r"(?is)<a[^>]*>|</a>", "", s)
+    s = _TAG_RE.sub("", s)
+    s = _unescape(s)
+    s = re.sub(r"[ \t]+\n", "\n", s)
+    s = re.sub(r"\n{3,}", "\n\n", s)
+    return s.strip()
+
+
 def _clean(html_text):
-    return _TAG_RE.sub("", html_text or "").replace("&nbsp;", " ").strip()
+    return _html_to_text(html_text or "")
 
 
 def normalize(st):
@@ -164,18 +195,69 @@ def normalize(st):
             "created": st.get("created_at", ""), "_st": st}
 
 
+def _pic_url(p):
+    """单张图片取最高清 URL, 并把 sinaimg 尺寸段统一升到 /large/。"""
+    if not isinstance(p, str):
+        if not isinstance(p, dict):
+            return ""
+        lg = p.get("large") or {}
+        u = (lg.get("url") or lg.get("mobile") or p.get("url")
+             or p.get("bmiddle") or p.get("thumbnail") or "")
+    else:
+        u = p
+    u = _unescape(u)
+    u = re.sub(r"/(thumbnail|bmiddle|orj360|orj480|small|wap180|square|cw180|fit|thumb960)/",
+               "/large/", u)
+    return u if u.startswith("http") else ""
+
+
 def _extract_pics(st):
-    """从状态里抽取图片 URL 列表。"""
+    """从状态里抽取图片 URL 列表(高清优先, 去重保序)。
+    兼容三种结构: PC 端 pic_infos{pid:{largest/bmiddle..}} + pic_ids 排序、
+    m 端 pics[]、page_info 封面。"""
     urls = []
+    infos = st.get("pic_infos") or {}
+    if isinstance(infos, dict) and infos:
+        order = st.get("pic_ids") or list(infos.keys())
+        for pid in order:
+            v = infos.get(pid)
+            if not isinstance(v, dict):
+                continue
+            u = ""
+            for grade in ("largest", "large", "middleplus", "bmiddle", "thumbnail", "small"):
+                g = v.get(grade) or {}
+                u = g.get("url") or g.get("mobile") or ""
+                if u:
+                    break
+            u = u or _pic_url(v)
+            urls.append(u)
     for p in (st.get("pics") or []):
-        if isinstance(p, dict):
-            large = (p.get("large") or {}).get("url")
-            urls.append(large or p.get("url") or p.get("thumbnail"))
+        urls.append(_pic_url(p))
     pi = st.get("page_info") or {}
     pic = (pi.get("page_pic") or {})
-    if isinstance(pic, dict) and pic.get("url"):
-        urls.append(pic["url"])
-    return [u for u in urls if u and u.startswith("http")]
+    if isinstance(pic, dict) and pic.get("url") and (pi.get("type") or "") not in ("video",):
+        urls.append(_pic_url(pic["url"]))
+    out, seen = [], set()
+    for u in urls:
+        if u and u not in seen:
+            seen.add(u)
+            out.append(u)
+    return out
+
+
+def _status_url(st, fallback=""):
+    """尽量构造该状态可播放/可读的网页链接(视频/图片点它最合适)。"""
+    user = st.get("user") or {}
+    uid = user.get("idstr") or ""
+    mid = str(st.get("mid") or st.get("id") or st.get("idstr") or "")
+    bid = st.get("bid") or st.get("mblogid") or ""
+    if bid:
+        return "https://m.weibo.cn/status/%s" % bid
+    if uid and mid:
+        return "https://weibo.com/%s/%s" % (uid, mid)
+    if mid:
+        return "https://m.weibo.cn/detail/%s" % mid
+    return fallback or ""
 
 
 def fetch_longtext(cookie_str, mid):
@@ -208,37 +290,112 @@ def fetch_article(cookie_str, url):
         return ""
 
 
-def build_content(cookie_str, item):
-    """组装推送正文 markdown: 作者/时间/正文/图/原文链接。"""
-    st = item.get("_st") or {}
-    text = item.get("text") or ""
-    # 长文替换为全文
-    if st.get("isLongText"):
-        full = fetch_longtext(cookie_str, item["mid"])
-        if full:
+def _long_content(st, cookie_str):
+    """长文全文三级取法: 列表 JSON 自带 longText.content -> PC 详情接口 -> m 端 extend。"""
+    lt = st.get("longText") or {}
+    if isinstance(lt, dict) and lt.get("content"):
+        return _html_to_text(lt["content"])
+    if isinstance(lt, str) and lt.strip():
+        return _html_to_text(lt)
+    ident = [str(st.get("mid") or st.get("id") or st.get("idstr") or "")]
+    bid = st.get("bid") or st.get("mblogid")
+    if bid:
+        ident.append(str(bid))
+    for key in ident:
+        if not key:
+            continue
+        try:
+            r = requests.get(PC + "/ajax/statuses/show?id=" + key,
+                             headers=_headers(cookie_str, PC, UA, _xsrf(cookie_str)),
+                             timeout=20)
+            j = r.json()
+            data = j.get("data") or j
+            lt2 = data.get("longText") or {}
+            if isinstance(lt2, dict) and lt2.get("content"):
+                return _html_to_text(lt2["content"])
+            if data.get("text") and str(data.get("id") or data.get("mid") or "") == ident[0]:
+                return _html_to_text(data["text"])
+        except Exception:
+            pass
+    return fetch_longtext(cookie_str, ident[0])
+
+
+def _rich_lines(st, cookie_str):
+    """把一条状态(主体或被转发源)展开成 markdown 块: 全文/图/视频/文章。"""
+    out = []
+    text = _html_to_text(st.get("text") or "")
+    if st.get("longText") or st.get("isLongText"):
+        full = _long_content(st, cookie_str)
+        if full and len(full) >= len(text) - 3:   # 全文不早于截断版
             text = full
-    # 转发补充被转发内容
-    rt = st.get("retweeted_status") or {}
-    if rt:
-        rt_txt = _clean(rt.get("text") or "")
-        rt_user = (rt.get("user") or {}).get("screen_name", "")
-        if rt_txt:
-            text += "\n\n// @" + rt_user + ": " + rt_txt
-    lines = [text.strip()]
+    pi = st.get("page_info") or {}
+    ptype = pi.get("type") or ""
+    mi = pi.get("media_info") or {}
+    pu = pi.get("page_url") or ""
+    is_video = (ptype == "video" or (mi and not ptype)
+                or "object_type=video" in pu or "url_type=39" in pu)
+    if is_video:
+        title = _unescape(pi.get("page_title") or pi.get("title") or "").strip()
+        vurl = _status_url(st)
+        line = "▶ 视频" + (("《%s》" % title) if title else "")
+        if vurl:
+            line += " [播放](%s)" % vurl
+        elif pu.startswith("http"):
+            line += " [播放](%s)" % pu
+        if text:
+            out.append(text)
+        out.append(line)
+    elif ptype == "article" or "ttarticle" in pu:
+        out.append(text or _unescape(pi.get("page_title") or pi.get("title") or ""))
+        art = fetch_article(cookie_str, pi.get("page_url") or _status_url(st))
+        if art:
+            out.append("---\n" + art)
+    else:
+        if text:
+            out.append(text)
+        if pi.get("page_url", "").startswith("http") and ptype not in ("", "feed"):
+            out.append("附页: %s (%s)" % (_unescape(pi.get("page_title")
+                          or pi.get("title") or ""), pi["page_url"]))
     pics = _extract_pics(st)
     if pics:
-        lines.append("\n".join("![img](%s)" % u for u in pics[:9]))
-    # 头条文章正文
-    pi = st.get("page_info") or {}
-    pu = pi.get("page_url") or ""
-    if pi.get("type") == "article" or "ttarticle" in pu or "/topics/" in pu:
-        art = fetch_article(cookie_str, pu)
-        if art:
-            lines.append("---\n" + art)
-    md = "\n\n".join(lines)
+        out.append("\n".join("![img%d](%s)" % (i + 1, u) for i, u in enumerate(pics[:18])))
+    return [x for x in out if x and x.strip()]
+
+
+def build_content(cookie_str, item):
+    """组装推送正文 markdown: 主体全文/图/视频 + 被转发源完整内容 + 元信息。"""
+    st = item.get("_st") or {}
+    blocks = _rich_lines(st, cookie_str)
+    rt = st.get("retweeted_status") or {}
+    if isinstance(rt, dict) and rt:
+        ru = (rt.get("user") or {}).get("screen_name", "")
+        rblocks = _rich_lines(rt, cookie_str)
+        rblocks.insert(0, ("—— 原博 @" + ru + ":") if ru else "—— 原博:")
+        rurl = _status_url(rt)
+        if rurl:
+            rblocks.append("(原博: %s)" % rurl)
+        blocks.append("\n\n".join(rblocks))
+    meta = []
+    created = item.get("created") or st.get("created_at") or ""
+    if created:
+        meta.append(str(created)[:16])
+    if st.get("region_name"):
+        meta.append(str(st["region_name"]))
+    src = str(st.get("source") or "")
+    if src and not src.startswith("http") and len(src) < 20:
+        meta.append(src)
+    if meta:
+        blocks.append(" · ".join(meta))
     if item.get("url"):
-        md += "\n\n原文: " + item["url"]
-    return md.strip()[:12000]
+        blocks.append("原文链接: " + item["url"])
+    md = "\n\n".join(b for b in blocks if b and b.strip())
+    # 标题升级: 作者 + 正文首行(更可读)
+    user = (st.get("user") or {}).get("screen_name") or ""
+    body_first = next((l for l in md.splitlines()
+                       if l.strip() and not l.strip().startswith(("![", "▶", "—"))), "")
+    if user and body_first:
+        item["title"] = ("%s: %s" % (user, body_first.strip()))[:90]
+    return md.strip()[:16000]
 
 
 def _statuses_of(node):
