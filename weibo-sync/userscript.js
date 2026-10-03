@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         微博 → NAS 稍后读自动搬运
 // @namespace    readstack-weibo-sync
-// @version      1.2
-// @description  在浏览器登录态下抓取微博收藏/点赞(含长文全文展开), 推送到自家 weibo-sync (免 Cookie 免 F12)
+// @version      1.3
+// @description  在浏览器登录态下抓取微博收藏/点赞(长文全文展开+全量翻页), 推送到自家 weibo-sync (免 Cookie 免 F12)
 // @match        https://weibo.com/*
 // @grant        GM_xmlhttpRequest
 // @grant        GM_cookie
@@ -14,7 +14,7 @@
 /* ===== 配置区: 只改这两行 ===== */
 const NAS = "http://192.168.30.165:31900";   // weibo-sync 面板地址
 const INTERVAL_MIN = 30;                      // 页面开着时每隔多少分钟自动同步一次
-const FAV_PAGES = 3, LIKE_PAGES = 2;          // 每轮各抓几页 (3页≈60条收藏, 2页≈40条点赞)
+const FAV_PAGES = 40, LIKE_PAGES = 16;       // 每轮各抓几页 (全量: 服务端按 mid 去重, 重复页秒过)
 /* ============================== */
 
 const TAG = "[微博搬运]";
