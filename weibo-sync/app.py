@@ -9,6 +9,7 @@ weibo-sync Web 面板 + 后台定时同步。
   /api/debug   端点校准辅助
 """
 import json
+import os
 import re
 import threading
 import time
@@ -212,6 +213,19 @@ def api_cookie():
         return jsonify({"ok": True, "msg": msg, "report": rep})
     return "<meta charset=utf-8><body style='font-family:sans-serif;padding:32px'>" \
            "<h3>✅ %s</h3><a href=/>返回面板</a>" % msg
+
+
+@app.route("/api/diag", methods=["POST", "OPTIONS"])
+def api_diag():
+    """油猴脚本诊断信息暂存(供 status 查看)。"""
+    payload = request.get_json(force=True, silent=True) or {}
+    try:
+        with open(os.path.join(config.STATE_DIR, "diag.json"), "w",
+                  encoding="utf-8") as f:
+            json.dump({"ts": time.time(), "data": payload}, f, ensure_ascii=False)
+    except Exception:
+        pass
+    return jsonify({"ok": True})
 
 
 @app.route("/api/run", methods=["POST"])
