@@ -71,7 +71,7 @@ def push(items, tags):
         # 微博页 Karakeep 自身无法登录抓取, 故作为文本书签把完整内容直接写入, 原文链接附在文末
         body = {
             "type": "text",
-            "text": (marker + "\n\n" + content)[:12000],
+            "text": (marker + "\n\n" + content)[:16000],
             "title": (x.get("title") or content[:40])[:120],
             "tagIds": tag_ids,
         }
