@@ -1,11 +1,14 @@
 // ==UserScript==
 // @name         微博 → NAS 稍后读自动搬运
 // @namespace    readstack-weibo-sync
-// @version      1.4
+// @version      1.5
 // @description  在浏览器登录态下抓取微博收藏/点赞(长文全文展开+全量翻页), 推送到自家 weibo-sync (免 Cookie 免 F12)
 // @match        https://weibo.com/*
 // @grant        GM_xmlhttpRequest
 // @grant        GM_cookie
+// @grant        GM_registerMenuCommand
+// @grant        GM_setClipboard
+// @grant        GM_notification
 // @connect      192.168.30.165
 // @run-at       document-idle
 // @noframes
@@ -55,10 +58,11 @@ async function getUid() {
   return "";
 }
 
-// ---- 完整 Cookie 上报 (含 HttpOnly 的 SUB_PRTS, 服务端后台轮询靠它) ----
+// ---- 完整 Cookie 上报: SSO 重发探测为主, GM_cookie 仅诊断 ----
 function reportCookie() {
-  const diag = {v: GM_info.scriptVersion || "1.4", t: Date.now()};
-  const finish = str => {
+  const diag = {v: (GM_info.script || {}).version || "1.5", t: Date.now()};
+  const send = (str, via) => {
+    diag.via = via;
     diag.final_len = (str || "").length;
     diag.final_hasP = /SUB_PRTS=/.test(str || "");
     gmFetch(NAS + "/api/diag", {method: "POST", body: JSON.stringify(diag)}).catch(() => {});
@@ -68,31 +72,18 @@ function reportCookie() {
         .catch(() => {});
     }
   };
-  try {
-    GM_cookie.list({url: "https://weibo.com/"}, cookies => {
-      diag.gm = "ok";
-      diag.count = cookies ? cookies.length : -1;
-      diag.names = (cookies || []).map(c => c.name).slice(0, 20);
-      if (cookies && cookies.length) {
-        finish(cookies.map(c => c.name + "=" + c.value).join("; "));
-        return;
-      }
-      ssoProbe(finish, diag);
-    }, err => {
-      diag.gm = "err";
-      diag.gm_err = JSON.stringify(err).slice(0, 200);
-      ssoProbe(finish, diag);
-    });
-    return;
-  } catch (e) {
-    diag.gm = "throw";
-    diag.gm_throw = String(e).slice(0, 120);
-  }
-  ssoProbe(finish, diag);
+  try {   // GM_cookie 结果只记入诊断(稳定版过滤 HttpOnly, 不可依赖)
+    GM_cookie.list({url: "https://weibo.com/"}, c => {
+      diag.gm = "ok"; diag.gm_count = c ? c.length : -1;
+      diag.gm_hasP = !!(c || []).some(x => x.name === "SUB_PRTS");
+      diag.names = (c || []).map(x => x.name).slice(0, 20);
+    }, e => { diag.gm = "err"; diag.gm_err = JSON.stringify(e).slice(0, 160); });
+  } catch (e) { diag.gm = "throw"; diag.gm_throw = String(e).slice(0, 120); }
+  ssoProbe(send, diag);
 }
 
 // ---- SSO 重发探测: login.php 对已登录会话会重新下发全套 Set-Cookie(含 SUB_PRTS) ----
-function ssoProbe(fallback, diag) {
+function ssoProbe(send, diag) {
   GM_xmlhttpRequest({
     method: "GET",
     url: "https://login.sina.com.cn/sso/login.php?entry=weibo&retcode=6102",
@@ -101,26 +92,26 @@ function ssoProbe(fallback, diag) {
     onload: r => {
       diag.sso_status = r.status;
       const rh = (r.responseHeaders || "").split("\n").filter(x => /set-cookie/i.test(x));
-      diag.sso_setcookies = rh.map(x => x.trim().slice(0, 90)).slice(0, 12);
+      diag.sso_headers = rh.length;
+      diag.sso_setcookies = rh.map(x => x.trim().slice(0, 60)).slice(0, 12);
       const jar = {};
       rh.forEach(line => {
         const m = line.match(/set-cookie:\s*([^=;]+)=([^;]*)/i);
         if (m) jar[m[1]] = m[2];
       });
       diag.jar_names = Object.keys(jar);
-      if (jar.SUB || jar.SUB_PRTS) {
-        const str = Object.keys(jar).map(k => k + "=" + jar[k]).join("; ");
-        diag.via = "sso";
-        finish(str);
-      } else {
-        diag.via = "doc";
-        fallback(document.cookie);
-      }
+      if (jar.SUB || jar.SUB_PRTS) send(Object.keys(jar).map(k => k + "=" + jar[k]).join("; "), "sso");
+      else send(document.cookie, "doc");
     },
-    onerror: () => { diag.sso = "neterr"; fallback(document.cookie); },
-    ontimeout: () => { diag.sso = "timeout"; fallback(document.cookie); },
+    onerror: () => { diag.sso = "neterr"; send(document.cookie, "doc"); },
+    ontimeout: () => { diag.sso = "timeout"; send(document.cookie, "doc"); },
   });
 }
+
+try {
+  GM_registerMenuCommand("🔄 刷新并上报 Cookie (SSO)", () =>
+    ssoProbe((s, v) => alert("via " + v + " hasP=" + /SUB_PRTS=/.test(s)), {v: "menu"}));
+} catch (e) {}
 
 // ---- 浏览器内长文展开: isLongText 但无 longText.content 的, 同源请求详情补齐 ----
 async function expandLongTexts(statuses, budget) {
