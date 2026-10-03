@@ -8,6 +8,7 @@ weibo-sync Web 面板 + 后台定时同步。
   /cookie      手动粘贴 Cookie (兜底方案)
   /api/debug   端点校准辅助
 """
+import json
 import re
 import threading
 import time
@@ -223,8 +224,17 @@ def api_run():
 @app.route("/api/ingest", methods=["POST", "OPTIONS"])
 def api_ingest():
     """接收油猴脚本从浏览器直接推送的微博原始 JSON (免 Cookie 主通道)。
-    body: {"kind": "fav"|"like", "data": <微博 ajax 原始响应>}"""
-    payload = request.get_json(force=True, silent=True) or {}
+    body: {"kind": "fav"|"like", "data": <微博 ajax 原始响应>}
+    兼容 form/text-plain 提交 (body 为 'p=<json>')。"""
+    payload = request.get_json(force=True, silent=True)
+    if payload is None:
+        raw_body = (request.get_data(as_text=True) or "").strip()
+        if raw_body.startswith("p="):
+            raw_body = raw_body[2:].strip()
+        try:
+            payload = json.loads(raw_body)
+        except Exception:
+            payload = {}
     kind = payload.get("kind")
     raw = payload.get("data")
     if kind not in ("fav", "like") or not isinstance(raw, dict):
