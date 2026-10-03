@@ -51,6 +51,28 @@ def _sanitize_cookie(raw):
     return raw
 
 
+def _parse_ck(s):
+    d = {}
+    for kv in (s or "").split(";"):
+        kv = kv.strip()
+        if "=" in kv:
+            k, v = kv.split("=", 1)
+            d[k.strip()] = v.strip()
+    return d
+
+
+def _merge_cookie(old, new):
+    """合并上报 Cookie: 保留旧里有而新里没有的键(如 HttpOnly 的 SUB_PRTS),
+    同名的以新为准。防止浏览器脚本的不完整上报覆盖服务端完整凭据。"""
+    od, nd = _parse_ck(old), _parse_ck(new)
+    if not od:
+        return new
+    for k, v in od.items():
+        if k not in nd:
+            nd[k] = v
+    return "; ".join("%s=%s" % kv for kv in nd.items())
+
+
 # ---------------- 页面 ----------------
 
 PAGE = """<!doctype html><meta charset=utf-8><title>weibo-sync</title>
@@ -175,6 +197,7 @@ def api_cookie():
     raw = _sanitize_cookie(raw)
     if not raw:
         return jsonify({"ok": False, "msg": "Cookie 为空"}) if _wants_json() else ("Cookie 为空", 400)
+    raw = _merge_cookie(state.get_cookie(), raw)   # 保留 HttpOnly 关键字段不被覆盖丢失
     ok, info = weibo_api.validate(raw)
     if not ok:
         msg = "校验失败: %s" % info
